@@ -1,0 +1,202 @@
+---
+- name: Setup db
+  hosts: db
+  become: yes
+  vars:
+    db_root_password: "kali"
+    db_repl_user: "repl_user"
+    db_repl_password: "kali"
+    db_user: "postgres"
+    db_password: "postgres"
+    db_database: "db_mail"
+  tasks:
+    - name: Install PostgreSQL server on DB master
+      apt:
+        name:
+          - postgresql-13
+          - postgresql-contrib
+        state: present
+        update_cache: yes
+
+    - name: Ensure PostgreSQL is running and enabled
+      service:
+        name: postgresql
+        state: started
+        enabled: yes
+
+
+    - name: Creating a users
+      become_user: "{{db_user}}"
+      postgresql_user:
+        name: "{{db_user}}"
+        password: "{{db_password}}"
+        role_attr_flags: "SUPERUSER"
+        state: present
+
+    - name: Configuration databases
+      become_user: "{{db_user}}"
+      postgresql_db:
+        name: "{{db_database}}"
+        owner: "{{db_user}}"
+        state: present
+
+    - name: Setting privilleges
+      become_user: "{{db_user}}"
+      community.postgresql.postgresql_privs:
+        db: postgres
+        type: database
+        obj: "{{db_database}}"
+        privs: ALL
+        role: "{{db_user}}"
+
+    - name: Creating repl_user
+      become_user: "{{db_user}}"
+      postgresql_user:
+        name: "{{db_repl_user}}"
+        password: "{{db_repl_password}}"
+        role_attr_flags: replication
+        state: present
+
+    - name: Configuration pg_hba
+      become_user: "{{db_user}}"
+      lineinfile:
+        path: "/etc/postgresql/{{pg_version}}/main/pg_hba.conf"
+        line: "host replication {{db_repl_user}} 0.0.0.0/0 md5"
+        state: present
+
+    - name: Configure PostgreSQL pg_hba.conf
+      become_user: "{{db_user}}"
+      lineinfile:
+        path: "/etc/postgresql/{{pg_version}}/main/pg_hba.conf"
+        line: "host all all 0.0.0.0/0 md5"
+        state: present
+
+    - name: Configure PostgreSQL for replication
+      become_user: "{{db_user}}"
+      blockinfile:
+        path: "/etc/postgresql/{{pg_version}}/main/postgresql.conf"
+        block: |
+          wal_level = replica
+          max_wal_senders = 10
+          max_replication_slots = 10
+          hot_standby = on
+          listen_addresses = '*'
+
+    - name: Create db tables
+      become_user: "{{db_user}}"
+      community.postgresql.postgresql_query:
+        db: "{{db_database}}"
+        query: >
+          CREATE TABLE IF NOT EXISTS emails (
+            id SERIAL PRIMARY KEY,
+            email VARCHAR(50) NOT NULL
+          );
+
+    - name: Create db tables
+      become_user: "{{db_user}}"
+      community.postgresql.postgresql_query:
+        db: "{{db_database}}"
+        query: >
+          CREATE TABLE IF NOT EXISTS phone (
+            id SERIAL PRIMARY KEY,
+            phone_numbers VARCHAR(50) NOT NULL
+          );
+
+    - name: Ensure PostgreSQL is running and enabled
+      service:
+        name: postgresql
+        state: started
+        enabled: yes
+
+- name: Setup bot
+  hosts: bot
+  become: yes
+  vars:
+    db_root_password: "kali"
+    db_repl_user: "repl_user"
+    db_repl_password: "kali"
+    db_user: "postgres"
+    db_password: "postgres"
+    db_database: "db_mail"
+  tasks:
+    - name: Python and git
+      apt:
+        name:
+          - python3.9
+          - python3-pip
+          - git
+        state: present
+
+
+    - name: Install psycopg2
+      pip:
+        name: psycopg2-binary
+
+    - name: Clone remote git repository
+      git:
+        repo: https://github.com/Kuhmaster/DevOps_ptstart/blob/main/bot
+        dest: /opt/bot
+      become: yes
+
+    - name: Installing package
+      pip:
+        requirements: "/opt/bot/requirements.txt"
+
+    - name: Transport .env
+      ansible.builtin.copy:
+        src: .env
+        dest: /opt/bot
+
+
+- name: Setup repl_user
+  hosts: db-repl
+  become: yes
+  vars:
+    db_root_password: "kali"
+    db_repl_user: "repl_user"
+    db_repl_password: "kali"
+    db_user: "postgres"
+    db_password: "postgres"
+    db_database: "db_mail"
+  tasks:
+    - name: Install packages
+      apt:
+        name:
+          - postgresql-13
+          - postgresql-contrib
+        state: present
+        update_cache: yes
+
+    - name: Copy pgpass file
+      become_user: postgres
+      copy:
+        src: .pgpass
+        dest: /var/lib/postgresql/.pgpass
+        mode: 0600
+
+    - name: Ensure PostgreSQL stop
+      service:
+        name: postgresql
+        state: stopped
+
+    - name: Remove old data directory
+      ansible.builtin.shell: rm -rf /var/lib/postgresql/{{pg_version}}/main/*
+
+    - name: Create replica
+      become_user: postgres
+      ansible.builtin.shell: pg_basebackup -R -h {{DB_HOST}} -U {{DB_REPL_USER}} -D /var/lib/postgresql/{{pg_version}}/main -P
+
+    - name: Ensure PostgreSQL is running and enabled
+      service:
+        name: postgresql
+        state: started
+        enabled: yes
+
+
+- name: Start the telegram bot
+  hosts: bot
+  tasks:
+    - name: Start bot
+      ansible.builtin.shell: "nohup python3 /opt/bot/telegram_bot.py &"
+
+...
